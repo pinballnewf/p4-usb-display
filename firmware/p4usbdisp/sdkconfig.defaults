@@ -26,10 +26,11 @@ CONFIG_SPIRAM_SPEED_200M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
 
-# --- USB: HS OTG controller, no built-in classes; usb_link.c supplies its own
-# zero-copy class driver. ---
+# --- USB: HS OTG controller. The display link uses usb_link.c's own class
+# driver (so no built-in vendor class); touch uses the built-in HID class. ---
 CONFIG_TINYUSB_RHPORT_HS=y
 CONFIG_TINYUSB_VENDOR_COUNT=0
+CONFIG_TINYUSB_HID_COUNT=1
 CONFIG_TINYUSB_CDC_COUNT=0
 CONFIG_TINYUSB_MSC_ENABLED=n
 

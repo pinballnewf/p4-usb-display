@@ -17,7 +17,8 @@
  * internal RAM. The DWC2 driver invalidates the cache over each received range,
  * and on PSRAM that costs ~11.5 ms per transfer. Copying 32 KB out of internal
  * RAM costs a fraction of that, and overlaps the next transfer because the other
- * bounce buffer is re-armed before the copy starts.
+ * bounce buffer is re-armed before the copy starts. The JPEG driver writes the
+ * slot back from cache itself before decoding.
  *
  * Three slots, so one can be decoding, one can hold the newest complete frame
  * and one can be filling - a free slot always exists when a header arrives.
@@ -28,13 +29,14 @@
 #include <string.h>
 
 #include "driver/jpeg_decode.h"
-#include "esp_cache.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/task.h"
 #include "tinyusb.h"
 #include "device/usbd_pvt.h"
+
+#include "touch.h"
 
 static const char *TAG = "usb_link";
 
@@ -43,22 +45,26 @@ static const char *TAG = "usb_link";
 #define USB_VID 0x303A
 #define USB_PID 0x4020 /* development PID, not allocated */
 
-enum { ITF_DISPLAY = 0, ITF_COUNT };
-#define EP_OUT 0x01
-#define EP_IN  0x81
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_VENDOR_DESC_LEN)
+/* Composite: interface 0 is the display link (vendor class, our own driver),
+ * interface 1 a standard HID multi-touch touchscreen (TinyUSB's HID class,
+ * bound by the host's hid-multitouch with no host-side code). */
+enum { ITF_DISPLAY = 0, ITF_TOUCH, ITF_COUNT };
+#define EP_OUT   0x01
+#define EP_IN    0x81
+#define EP_TOUCH 0x82
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_VENDOR_DESC_LEN + TUD_HID_DESC_LEN)
 
 static const tusb_desc_device_t s_device_desc = {
     .bLength = sizeof(tusb_desc_device_t),
     .bDescriptorType = TUSB_DESC_DEVICE,
     .bcdUSB = 0x0200,
-    .bDeviceClass = TUSB_CLASS_VENDOR_SPECIFIC,
+    .bDeviceClass = TUSB_CLASS_UNSPECIFIED, /* per interface: vendor + HID */
     .bDeviceSubClass = 0x00,
     .bDeviceProtocol = 0x00,
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor = USB_VID,
     .idProduct = USB_PID,
-    .bcdDevice = 0x0200,
+    .bcdDevice = 0x0300,
     .iManufacturer = 1,
     .iProduct = 2,
     .iSerialNumber = 3,
@@ -69,7 +75,7 @@ static const tusb_desc_device_qualifier_t s_qualifier_desc = {
     .bLength = sizeof(tusb_desc_device_qualifier_t),
     .bDescriptorType = TUSB_DESC_DEVICE_QUALIFIER,
     .bcdUSB = 0x0200,
-    .bDeviceClass = TUSB_CLASS_VENDOR_SPECIFIC,
+    .bDeviceClass = TUSB_CLASS_UNSPECIFIED, /* per interface: vendor + HID */
     .bDeviceSubClass = 0x00,
     .bDeviceProtocol = 0x00,
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
@@ -80,11 +86,14 @@ static const tusb_desc_device_qualifier_t s_qualifier_desc = {
 static const uint8_t s_fs_config_desc[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_COUNT, 0, CONFIG_TOTAL_LEN, 0, 500),
     TUD_VENDOR_DESCRIPTOR(ITF_DISPLAY, 4, EP_OUT, EP_IN, 64),
+    TUD_HID_DESCRIPTOR(ITF_TOUCH, 5, HID_ITF_PROTOCOL_NONE, TOUCH_HID_REPORT_DESC_LEN, EP_TOUCH, 64, 1),
 };
 
 static const uint8_t s_hs_config_desc[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_COUNT, 0, CONFIG_TOTAL_LEN, 0, 500),
     TUD_VENDOR_DESCRIPTOR(ITF_DISPLAY, 4, EP_OUT, EP_IN, 512),
+    /* bInterval 4 at high speed = 2^(4-1) microframes = 1 ms */
+    TUD_HID_DESCRIPTOR(ITF_TOUCH, 5, HID_ITF_PROTOCOL_NONE, TOUCH_HID_REPORT_DESC_LEN, EP_TOUCH, 64, 4),
 };
 
 static const char *s_string_desc[] = {
@@ -93,6 +102,7 @@ static const char *s_string_desc[] = {
     "P4 USB Display",
     "000001",
     "Display",
+    "Touch",
 };
 
 /* ---- Frame slots ---- */
@@ -312,9 +322,9 @@ static bool drv_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, u
             uint8_t *slot = s_slots[s_fill].data;
             memcpy(slot + at, src, got);
             if (done) {
-                /* The JPEG engine reads the slot by DMA: write the copy back. */
-                size_t n = (s_len + CONFIG_CACHE_L2_CACHE_LINE_SIZE - 1) & ~(CONFIG_CACHE_L2_CACHE_LINE_SIZE - 1);
-                esp_cache_msync(slot, n, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+                /* No cache writeback here: jpeg_decoder_process() writes the
+                 * input range back itself before its DMA starts (and the slots
+                 * are not cache-aligned, so an explicit msync would be refused). */
                 on_payload_done();
             }
         }
@@ -367,6 +377,27 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
     default:
         return false; /* stall */
     }
+}
+
+/* ---- HID touchscreen (report layout lives in touch.c) ---- */
+
+uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance)
+{
+    (void)instance;
+    return touch_hid_report_desc;
+}
+
+uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t type,
+                               uint8_t *buf, uint16_t len)
+{
+    (void)instance;
+    return type == HID_REPORT_TYPE_FEATURE ? touch_hid_get_feature(report_id, buf, len) : 0;
+}
+
+void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t type,
+                           uint8_t const *buf, uint16_t len)
+{
+    /* Nothing settable: Windows' input-mode feature is not declared. */
 }
 
 void tud_mount_cb(void)

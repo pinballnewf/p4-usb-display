@@ -3,7 +3,9 @@
 The Guition JC8012P4A1C (ESP32-P4 + ESP32-C6, 10.1" 800×1280 IPS MIPI-DSI) as a
 real extra monitor for a Linux laptop over one USB 2.0 cable. The desktop sees
 it as a normal display (KDE: output `DVI-I-1`, "P4 USB Panel"), with orientation,
-placement and power handled by the compositor like any other monitor.
+placement and power handled by the compositor like any other monitor. The
+panel's touchscreen shows up as a standard multi-touch HID device, so tapping,
+dragging, two-finger scroll and pinch work on the desktop with no host code.
 
 ```
 KWin ──> EVDI virtual connector ──> evdi_display.py ──USB 2.0 HS──> P4 ──> JD9365 panel
@@ -20,7 +22,7 @@ display-related. This repo adds the USB link and the Linux side.
 | USB-C port | What it is | Used for |
 |---|---|---|
 | upper | P4 USB-Serial-JTAG, `/dev/ttyACM0` | flashing, logs, RTS reset |
-| **middle** | P4 USB 2.0 **High-Speed OTG** (`303a:4020` when running) | the display link |
+| **middle** | P4 USB 2.0 **High-Speed OTG** (`303a:4020` when running) | the display link and touch |
 | lower | CH340 USB-UART | flashing (RTS reset does nothing here) |
 
 The middle port alone powers the board and carries the display.
@@ -30,7 +32,8 @@ ESP32-P4 silicon is **v1.3** (pre-v3): builds need `CONFIG_ESP32P4_SELECTS_REV_L
 
 | | |
 |---|---|
-| `firmware/p4usbdisp/` | the display firmware |
+| `firmware/p4usbdisp/` | the display firmware (display link + HID touchscreen) |
+| `firmware/p4usbdisp/components/gsl3680/` | touch controller driver, from p4dash, plus a multi-point read |
 | `firmware/usb_hs_test/` | bare HS bulk throughput test (kept as a reference measurement) |
 | `host/evdi_display.py` | the daemon: EVDI monitor → JPEG → USB |
 | `host/edid.py` | EDID for the virtual connector (800×1280, 135×217 mm) |
@@ -81,6 +84,15 @@ sudo udevadm control --reload
 cp host/system/p4-usb-display.service ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable p4-usb-display
 ```
 
+Tie the touchscreen to the P4's monitor once (KDE saves it in `kcminputrc`
+against the device and the monitor's UUID; find the `eventN` with
+`qdbus6 org.kde.KWin /org/kde/KWin/InputDevice org.kde.KWin.InputDeviceManager.ListTouch`,
+or use System Settings → Touchscreen):
+
+```bash
+qdbus6 org.kde.KWin /org/kde/KWin/InputDevice/eventN org.freedesktop.DBus.Properties.Set org.kde.KWin.InputDevice outputName DVI-I-1
+```
+
 From then on, plugging the board in starts the daemon and the monitor appears;
 unplugging removes it. Set orientation in KDE's display settings (or
 `kscreen-doctor output.DVI-I-1.rotation.none|left|right|inverted`) — KDE
@@ -91,9 +103,19 @@ systemctl --user status p4-usb-display
 journalctl --user -u p4-usb-display -f
 ```
 
-## Wire protocol
+## USB interfaces and wire protocol
 
-Vendor-class interface 0, bulk OUT `0x01`. Each frame is two writes: a 16-byte
+Composite device, class defined per interface:
+
+| | |
+|---|---|
+| interface 0 | vendor class, bulk OUT `0x01` - the display link below |
+| interface 1 | HID multi-touch touchscreen, interrupt IN `0x82`, 1 ms - 5 contacts in panel pixels (800×1280) with physical size 135×217 mm, so the compositor maps and rotates it with the monitor |
+
+The touch controller's point order and 4-bit finger tag are not stable identities, so
+the board runs a nearest-neighbour tracker to give each finger a persistent HID contact ID.
+
+Display link: vendor-class interface 0, bulk OUT `0x01`. Each frame is two writes: a 16-byte
 header `{u32 magic "P4D1", u8 type, u8 flags, u16 reserved, u32 len, u32 seq}`
 (little-endian; a short packet, so it ends the device-side transfer), then `len`
 bytes of baseline 4:2:0 JPEG at exactly 800×1280. The host resets the USB port
@@ -113,13 +135,21 @@ against ~30 MB/s. TinyUSB's DWC2 driver invalidates the cache over every receive
 range, and on PSRAM that costs ~11.5 ms per transfer regardless of size. The
 symptom is every host write taking ~12 ms, including a 16-byte header. Receive
 into internal-RAM bounce buffers and `memcpy` into PSRAM (re-arm the other bounce
-buffer before copying, so the copy overlaps the next transfer), then one
-`esp_cache_msync(C2M)` over the finished frame for the JPEG engine's DMA.
+buffer before copying, so the copy overlaps the next transfer). The JPEG driver
+writes the copied frame back from cache itself before decoding (next trap).
 
 **Never M2C-invalidate a PSRAM frame slot in the hot path.** An explicit
 `esp_cache_msync(M2C)` over a 35 KB PSRAM slot before decoding cost ~200 ms per
 frame and throttled the board to 5 fps while the log said decode took 13 ms.
 It is redundant anyway: the driver invalidates each received range.
+
+**Do not cache-sync JPEG input buffers yourself either.** `jpeg_alloc_decoder_mem`
+only cache-aligns *output* buffers; input buffers are a plain allocation, and
+`jpeg_decoder_process()` writes the input range back itself (with the unaligned
+flag) before its DMA starts. An explicit C2M on the slot is redundant, and fails
+with "not aligned with cache line size" whenever the heap layout happens to put
+the slot off a 64-byte boundary - which it did only after unrelated allocations
+(touch) were added, so it looked like touch had broken the display path.
 
 **TinyUSB's stock vendor class caps out around 7 MB/s.** It funnels everything
 through a 512-byte FIFO with a copy. An app-level class driver
@@ -141,6 +171,17 @@ Rotating on the CPU costs ~6 ms per frame, four times the JPEG encode. With an
 order. Consequence: never set rotation from the daemon by default — it will fight
 the user's choice (`--rotate-output` exists for first-time setup only).
 
+**Do not SET_CONFIGURATION a device whose touch interface the kernel owns.**
+Once `hid-multitouch` has bound interface 1, `set_configuration()` fails with
+EBUSY. `p4disp.py` only configures an unconfigured device.
+
+**A composite device needs `bDeviceClass` 0.** With the device-level class set to
+vendor-specific, the host has no reason to look for a HID interface inside it.
+
+**A USB touchscreen is not mapped to its monitor automatically.** KWin leaves an
+external touchscreen with no output, so touches land on the wrong screen until
+`outputName` is set (see Setup). The setting then persists.
+
 **uaccess rules must sort before `73-seat-late.rules`.** A `99-*.rules` file with
 `TAG+="uaccess"` silently does nothing; the device stays root-only and pyusb
 reports "The device has no langid". Hence the `70-` prefixes.
@@ -157,9 +198,5 @@ first time when restarting the service.
 
 ## Not done
 
-- **Touch.** The GSL3680 driver in p4dash plus a USB HID touchscreen interface
-  would do it; KDE maps touchscreens to their output, so orientation would follow.
-- **Tearing.** Frames decode straight into the single scanned frame buffer (the
-  p4dash-proven path). A second frame buffer with a vsync flip would remove the
-  occasional tear line on fast motion.
+- **Sound.** ES8311 codec + NS4150 amp, as USB Audio Class (in progress).
 - **Real USB PID.** `303a:4020` is an unallocated development PID.

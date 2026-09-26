@@ -28,7 +28,14 @@ class P4Display:
         # re-arms its header read, so every session starts in sync.
         dev.reset()
         dev = usb.core.find(idVendor=VID, idProduct=PID)
-        dev.set_configuration()
+        # Only configure an unconfigured device: once the kernel's hid-multitouch
+        # has bound the touch interface, SET_CONFIGURATION fails with EBUSY.
+        try:
+            configured = dev.get_active_configuration() is not None
+        except usb.core.USBError:
+            configured = False
+        if not configured:
+            dev.set_configuration()
         usb.util.claim_interface(dev, 0)
         self.dev = dev
         self.seq = 0

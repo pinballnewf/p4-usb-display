@@ -18,8 +18,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "driver/i2c_master.h"
+
 #include "bsp_display.h"
 #include "bsp_pins.h"
+#include "touch.h"
 #include "usb_link.h"
 
 static const char *TAG = "p4usbdisp";
@@ -78,6 +81,22 @@ void app_main(void)
     usb_link_set_stats_ext(stats_ext);
     usb_link_set_backlight_cb(backlight_cb);
     ESP_ERROR_CHECK(usb_link_init());
+
+    /* Shared with the ES8311 codec. No external pull-ups on this board. */
+    i2c_master_bus_config_t i2c_cfg = {
+        .i2c_port = BSP_I2C_PORT,
+        .sda_io_num = BSP_I2C_SDA,
+        .scl_io_num = BSP_I2C_SCL,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = BSP_I2C_INTERNAL_PULLUP,
+    };
+    i2c_master_bus_handle_t i2c_bus = NULL;
+    ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_cfg, &i2c_bus));
+    /* A missing or failed touch controller must not take the display down. */
+    if (touch_init(i2c_bus) != ESP_OK) {
+        ESP_LOGE(TAG, "touch unavailable - display only");
+    }
 
     jpeg_decoder_handle_t dec = NULL;
     /* Timeout well above the ~10.5 ms a frame takes, low enough that a
