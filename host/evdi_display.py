@@ -240,13 +240,32 @@ class EvdiDisplay:
                     self.t_ready = time.perf_counter()
 
             if now - t_report >= 5:
+                s = self.disp.stats()
+                audio = self.audio_line(s)
                 if st.n:
-                    s = self.disp.stats()
                     print(st.line(now - t_report) +
                           f" | board decode {s.get('decode_us_last', 0) / 1000:.1f} ms"
-                          f" stale {s['frames_stale']} fail {s.get('decode_fail')}", flush=True)
+                          f" stale {s['frames_stale']} fail {s.get('decode_fail')}" + audio, flush=True)
+                elif audio:
+                    print("display idle" + audio, flush=True)
                 st = Stats()
                 t_report = now
+
+    def audio_line(self, s):
+        """Board playback health since the last report, if audio has run."""
+        if "audio_chunks" not in s:
+            return ""
+        prev = getattr(self, "_audio_prev", s)
+        self._audio_prev = s
+        chunks = s["audio_chunks"] - prev["audio_chunks"]
+        if not chunks:
+            return ""
+        fifo = f"{s['audio_fifo_min']}-{s['audio_fifo_max']}" if s["audio_fifo_max"] else "-"
+        pkts = s.get("audio_rx_packets", 0) - prev.get("audio_rx_packets", 0)
+        rxb = s.get("audio_rx_bytes", 0) - prev.get("audio_rx_bytes", 0)
+        secs = chunks / 1000
+        return (f" | audio {secs:.1f} s underruns {s['audio_underruns'] - prev['audio_underruns']}"
+                f" fifo {fifo} B rx {pkts / secs:.0f} pkt/s {rxb / secs:.0f} B/s")
 
     def close(self):
         try:

@@ -20,6 +20,7 @@
  */
 #define P4D_MAGIC          0x31443450u /* "P4D1" */
 #define P4D_TYPE_JPEG_FULL 1           /* baseline JPEG, 4:2:0, 800x1280 portrait */
+#define P4D_TYPE_BENCH     2           /* diagnostic: received into a slot like a frame, then dropped */
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -59,7 +60,8 @@ esp_err_t usb_link_init(void);
 
 /* Blocks up to `wait` for the newest complete frame. Returns false on timeout.
  * Older frames that arrived meanwhile are dropped (counted as stale). The slot
- * belongs to the caller until usb_link_release(). */
+ * belongs to the caller until usb_link_release(), and payload reception is
+ * paused until then (see usb_link.c) - so release as soon as the decode ends. */
 bool usb_link_take(usb_link_frame_t *out, TickType_t wait);
 void usb_link_release(const usb_link_frame_t *f);
 

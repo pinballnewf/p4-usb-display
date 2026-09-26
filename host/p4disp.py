@@ -17,6 +17,7 @@ PANEL_W, PANEL_H = 800, 1280  # native portrait raster
 
 _LINK_STATS = struct.Struct("<QIIIII")
 _DEC_STATS = struct.Struct("<IIII")
+_AUDIO_STATS = struct.Struct("<IIIHHII")
 
 
 class P4Display:
@@ -65,6 +66,11 @@ class P4Display:
         if len(raw) >= _LINK_STATS.size + _DEC_STATS.size:
             link.update(zip(("frames_shown", "decode_fail", "decode_us_last", "decode_us_avg"),
                             _DEC_STATS.unpack_from(raw, _LINK_STATS.size)))
+        off = _LINK_STATS.size + _DEC_STATS.size
+        if len(raw) >= off + _AUDIO_STATS.size:
+            link.update(zip(("audio_streams", "audio_underruns", "audio_chunks", "audio_fifo_min",
+                             "audio_fifo_max", "audio_rx_packets", "audio_rx_bytes"),
+                            _AUDIO_STATS.unpack_from(raw, off)))
         return link
 
 

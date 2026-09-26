@@ -22,6 +22,15 @@
  *
  * Three slots, so one can be decoding, one can hold the newest complete frame
  * and one can be filling - a free slot always exists when a header arrives.
+ *
+ * Payload reception pauses while a frame decodes. The JPEG engine moves ~200 MB/s
+ * for ~10 ms, and the USB controller's DMA cannot drain its receive FIFO in that
+ * time; bulk display data kept arriving and filled the FIFO (bulk is simply
+ * accepted until it is full), so the next isochronous audio packet found no room
+ * and was lost - about one per decoded frame, audible as static. With no payload
+ * transfer armed the controller NAKs bulk instead of storing it, leaving the FIFO
+ * to audio. Headers (16 bytes) are still accepted. Receive and decode were
+ * already serialising on memory bandwidth, so this costs little throughput.
  */
 
 #include "usb_link.h"
@@ -69,7 +78,7 @@ static const tusb_desc_device_t s_device_desc = {
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor = USB_VID,
     .idProduct = USB_PID,
-    .bcdDevice = 0x0400,
+    .bcdDevice = 0x0402,
     .iManufacturer = 1,
     .iProduct = 2,
     .iSerialNumber = 3,
@@ -93,7 +102,7 @@ static const uint8_t s_fs_config_desc[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_COUNT, 0, CONFIG_TOTAL_LEN, 0, 500),
     TUD_VENDOR_DESCRIPTOR(ITF_DISPLAY, 4, EP_OUT, EP_IN, 64),
     TUD_HID_DESCRIPTOR(ITF_TOUCH, 5, HID_ITF_PROTOCOL_NONE, TOUCH_HID_REPORT_DESC_LEN, EP_TOUCH, 64, 1),
-    AUDIO_SPEAKER_DESCRIPTOR(TUD_AUDIO_EP_SIZE(false, AUDIO_SAMPLE_RATE, AUDIO_BYTES_PER_SMP, AUDIO_CHANNELS), 1),
+    AUDIO_SPEAKER_DESCRIPTOR(TUD_AUDIO_EP_SIZE(false, AUDIO_SAMPLE_RATE, AUDIO_BYTES_PER_SMP, AUDIO_CHANNELS), 1, 1),
 };
 
 static const uint8_t s_hs_config_desc[] = {
@@ -101,8 +110,9 @@ static const uint8_t s_hs_config_desc[] = {
     TUD_VENDOR_DESCRIPTOR(ITF_DISPLAY, 4, EP_OUT, EP_IN, 512),
     /* bInterval 4 at high speed = 2^(4-1) microframes = 1 ms */
     TUD_HID_DESCRIPTOR(ITF_TOUCH, 5, HID_ITF_PROTOCOL_NONE, TOUCH_HID_REPORT_DESC_LEN, EP_TOUCH, 64, 4),
-    /* feedback interval 4 at high speed = every 8 microframes = 1 ms */
-    AUDIO_SPEAKER_DESCRIPTOR(TUD_AUDIO_EP_SIZE(true, AUDIO_SAMPLE_RATE, AUDIO_BYTES_PER_SMP, AUDIO_CHANNELS), 4),
+    /* Audio data and feedback both every 8 microframes (bInterval 4) = 1 ms,
+     * so data packets are full-speed sized. See audio.h for why. */
+    AUDIO_SPEAKER_DESCRIPTOR(TUD_AUDIO_EP_SIZE(false, AUDIO_SAMPLE_RATE, AUDIO_BYTES_PER_SMP, AUDIO_CHANNELS), 4, 4),
 };
 
 static const char *s_string_desc[] = {
@@ -147,6 +157,9 @@ static int        s_bidx;
 static int        s_fill = -1;
 static uint32_t   s_off, s_len, s_req;
 static uint8_t    s_ep_out, s_ep_in;
+static uint8_t    s_rhport;
+static volatile bool s_hold;   /* a decode is running: do not arm payload */
+static bool       s_arm_pending; /* payload arm deferred by s_hold (TinyUSB task only) */
 
 static usb_link_stats_t s_stats;
 static usb_link_stats_ext_cb_t s_stats_ext;
@@ -167,6 +180,11 @@ static void arm(uint8_t rhport)
 {
     uint8_t *dst;
     uint32_t n;
+
+    if (s_hold && s_rx != RX_HEADER) {
+        s_arm_pending = true; /* resumed by resume_rx() once the decode is done */
+        return;
+    }
 
     switch (s_rx) {
     case RX_PAYLOAD:
@@ -202,7 +220,7 @@ static void on_header(uint32_t got)
 
     s_len = h.len;
     s_off = 0;
-    if (h.len > USB_LINK_SLOT_BYTES || h.type != P4D_TYPE_JPEG_FULL) {
+    if (h.len > USB_LINK_SLOT_BYTES || (h.type != P4D_TYPE_JPEG_FULL && h.type != P4D_TYPE_BENCH)) {
         s_stats.oversize++;
         s_rx = RX_DISCARD;
         return;
@@ -233,6 +251,10 @@ static void on_header(uint32_t got)
 
 static void on_payload_done(void)
 {
+    if (s_slots[s_fill].type == P4D_TYPE_BENCH) {
+        release_filling(); /* exercised the receive path; nothing to show */
+        return;
+    }
     portENTER_CRITICAL(&s_lock);
     if (s_ready >= 0) {
         s_slots[s_ready].state = SLOT_FREE;
@@ -260,9 +282,20 @@ static bool drv_deinit(void)
     return true;
 }
 
+/* Runs in the TinyUSB task (deferred from usb_link_release). */
+static void resume_rx(void *param)
+{
+    (void)param;
+    if (s_arm_pending && !s_hold && s_ep_out) {
+        s_arm_pending = false;
+        arm(s_rhport);
+    }
+}
+
 static void drv_reset(uint8_t rhport)
 {
     (void)rhport;
+    s_arm_pending = false;
     release_filling();
     s_rx = RX_HEADER;
     s_ep_out = s_ep_in = 0;
@@ -279,6 +312,8 @@ static uint16_t drv_open(uint8_t rhport, tusb_desc_interface_t const *itf, uint1
         return 0;
     }
     release_filling();
+    s_rhport = rhport;
+    s_arm_pending = false;
     s_rx = RX_HEADER;
     arm(rhport);
     return len;
@@ -423,6 +458,28 @@ void tud_umount_cb(void)
 
 /* ---- Public API ---- */
 
+struct install_ctx {
+    TaskHandle_t caller;
+    esp_err_t    err;
+};
+
+static void install_task(void *arg)
+{
+    struct install_ctx *ctx = arg;
+    const tinyusb_config_t cfg = {
+        .device_descriptor = &s_device_desc,
+        .string_descriptor = s_string_desc,
+        .string_descriptor_count = sizeof(s_string_desc) / sizeof(s_string_desc[0]),
+        .external_phy = false,
+        .fs_configuration_descriptor = s_fs_config_desc,
+        .hs_configuration_descriptor = s_hs_config_desc,
+        .qualifier_descriptor = &s_qualifier_desc,
+    };
+    ctx->err = tinyusb_driver_install(&cfg);
+    xTaskNotifyGive(ctx->caller);
+    vTaskDelete(NULL);
+}
+
 esp_err_t usb_link_init(void)
 {
     s_consumer = xTaskGetCurrentTaskHandle();
@@ -445,16 +502,16 @@ esp_err_t usb_link_init(void)
         s_slots[i].state = SLOT_FREE;
     }
 
-    const tinyusb_config_t cfg = {
-        .device_descriptor = &s_device_desc,
-        .string_descriptor = s_string_desc,
-        .string_descriptor_count = sizeof(s_string_desc) / sizeof(s_string_desc[0]),
-        .external_phy = false,
-        .fs_configuration_descriptor = s_fs_config_desc,
-        .hs_configuration_descriptor = s_hs_config_desc,
-        .qualifier_descriptor = &s_qualifier_desc,
-    };
-    ESP_RETURN_ON_ERROR(tinyusb_driver_install(&cfg), TAG, "tinyusb");
+    /* Install from a task pinned to core 1: the USB interrupt is allocated on
+     * the installing core, and core 0 runs the JPEG decode loop. Sharing a core
+     * with the decode, the ISR was delayed past a 125 us microframe about once
+     * per decoded frame and the isochronous audio packet for it was lost -
+     * audible as static. The TinyUSB task already runs on core 1. */
+    struct install_ctx ctx = { .caller = xTaskGetCurrentTaskHandle() };
+    ESP_RETURN_ON_FALSE(xTaskCreatePinnedToCore(install_task, "usb_install", 4096, &ctx, 5, NULL, 1) == pdPASS,
+                        ESP_ERR_NO_MEM, TAG, "install task");
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    ESP_RETURN_ON_ERROR(ctx.err, TAG, "tinyusb");
     ESP_LOGI(TAG, "USB display link up (%d x %d KB slots)", NUM_SLOTS, USB_LINK_SLOT_BYTES / 1024);
     return ESP_OK;
 }
@@ -474,6 +531,7 @@ bool usb_link_take(usb_link_frame_t *out, TickType_t wait)
     if (slot < 0) {
         return false;
     }
+    s_hold = true; /* the caller is about to decode */
 
     slot_t *s = &s_slots[slot];
 
@@ -490,6 +548,8 @@ void usb_link_release(const usb_link_frame_t *f)
     portENTER_CRITICAL(&s_lock);
     s_slots[f->slot].state = SLOT_FREE;
     portEXIT_CRITICAL(&s_lock);
+    s_hold = false;
+    usbd_defer_func(resume_rx, NULL, false);
 }
 
 void usb_link_get_stats(usb_link_stats_t *out)

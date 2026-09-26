@@ -23,6 +23,7 @@
 
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
+#include "esp_attr.h"
 #include "esp_check.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
@@ -39,6 +40,17 @@ static const char *TAG = "audio";
 #define CHUNK_FRAMES (AUDIO_SAMPLE_RATE / 1000) /* 1 ms */
 #define CHUNK_BYTES  (CHUNK_FRAMES * FRAME_BYTES)
 #define FIFO_BYTES   CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ
+/* Feedback target: ~10.7 ms of audio. Well below FIFO_BYTES on purpose - the
+ * FIFO-count controller is proportional on a slow average and overshoots by
+ * about another 2 KB at the start of every stream; with the target at half of
+ * a 4 KB FIFO that overshoot filled it and dropped samples. */
+#define FIFO_TARGET  2048
+
+/* I2S DMA ring: 4 x 240 frames = 20 ms. Filled with silence at stream start so
+ * every write after that blocks at the real sample rate (see audio_task). */
+#define I2S_DMA_DESC   4
+#define I2S_DMA_FRAMES 240
+#define I2S_RING_BYTES (I2S_DMA_DESC * I2S_DMA_FRAMES * FRAME_BYTES)
 
 /* Host volume range: -50..0 dB in 1 dB steps, in the UAC2 1/256 dB unit. */
 #define VOL_MIN_DB256 (-50 * 256)
@@ -55,6 +67,15 @@ static volatile bool    s_streaming;
 static volatile bool    s_dirty = true;
 static volatile int16_t s_vol[AUDIO_CHANNELS + 1] = { -10 * 256, 0, 0 };
 static volatile bool    s_mute[AUDIO_CHANNELS + 1];
+
+static audio_stats_t s_stats = { .fifo_min = UINT16_MAX };
+
+void audio_get_stats(audio_stats_t *out)
+{
+    *out = s_stats;
+    s_stats.fifo_min = UINT16_MAX;
+    s_stats.fifo_max = 0;
+}
 
 static void pa_enable(bool on)
 {
@@ -101,29 +122,43 @@ static void audio_task(void *arg)
         if (!running) {
             /* Prefill to the feedback target (half the FIFO) before draining,
              * so the rate loop starts from where it wants to be. */
-            if (tud_audio_available() < FIFO_BYTES / 2) {
+            if (tud_audio_available() < FIFO_TARGET) {
                 vTaskDelay(pdMS_TO_TICKS(1));
                 continue;
             }
+            /* Fill the I2S DMA ring with silence first. Writes into an empty
+             * ring return immediately, so without this the loop drained the
+             * USB FIFO far faster than real time, underran, re-prefilled and
+             * did it again - five or six gaps at the start of every stream.
+             * With the ring full, every write blocks for exactly its own
+             * duration from the first chunk on. In steady state the ring is
+             * full anyway, so this adds no latency. It also clocks silence
+             * through the codec before the amp comes up. */
+            memset(buf, 0, sizeof(buf));
+            for (int b = 0; b < I2S_RING_BYTES; b += sizeof(buf)) {
+                esp_codec_dev_write(s_dev, buf, sizeof(buf));
+            }
             running = true;
             if (!amp_on) {
-                /* Clock a little silence through the codec before the amp
-                 * comes up, so it does not switch on into a step. */
-                memset(buf, 0, sizeof(buf));
-                for (int i = 0; i < 10; i++) {
-                    esp_codec_dev_write(s_dev, buf, sizeof(buf));
-                }
                 pa_enable(true);
                 amp_on = true;
+                s_stats.streams++;
                 ESP_LOGI(TAG, "stream started, amp on");
             }
         }
 
+        uint16_t level = tud_audio_available();
+        if (level < s_stats.fifo_min) s_stats.fifo_min = level;
+        if (level > s_stats.fifo_max) s_stats.fifo_max = level;
+
         uint16_t n = tud_audio_read(buf, sizeof(buf));
+        s_stats.chunks++;
         if (n < sizeof(buf)) {
-            /* Underrun: pad with silence and re-prefill before resuming. */
+            /* Underrun: pad with silence and keep the I2S pacing going. The
+             * feedback loop sees the low FIFO and speeds the host up; pausing
+             * to re-prefill would let the ring drain and cascade into more. */
             memset((uint8_t *)buf + n, 0, sizeof(buf) - n);
-            running = false;
+            s_stats.underruns++;
         }
         /* The ES8311 has a single DAC fed from the left slot, driving one
          * speaker: fold both channels into it so nothing panned right is lost. */
@@ -146,6 +181,8 @@ esp_err_t audio_init(i2c_master_bus_handle_t bus)
 
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(BSP_I2S_PORT, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true; /* emit silence rather than the last buffer */
+    chan_cfg.dma_desc_num = I2S_DMA_DESC;
+    chan_cfg.dma_frame_num = I2S_DMA_FRAMES;
     ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, &s_tx, NULL), TAG, "i2s channel");
 
     i2s_std_config_t std_cfg = {
@@ -317,11 +354,21 @@ bool tud_audio_set_itf_close_ep_cb(uint8_t rhport, tusb_control_request_t const 
     return true;
 }
 
+/* ISR context: every isochronous OUT packet that made it into the FIFO.
+ * In IRAM with the rest of the USB interrupt path (see linker.lf). */
+IRAM_ATTR bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id,
+                           uint8_t ep_out, uint8_t cur_alt_setting)
+{
+    s_stats.rx_packets++;
+    s_stats.rx_bytes += n_bytes_received;
+    return true;
+}
+
 void tud_audio_feedback_params_cb(uint8_t func_id, uint8_t alt_itf, audio_feedback_params_t *p)
 {
     (void)func_id;
     (void)alt_itf;
     p->method = AUDIO_FEEDBACK_METHOD_FIFO_COUNT;
     p->sample_freq = AUDIO_SAMPLE_RATE;
-    /* fifo_threshold left 0: the driver targets half the FIFO (~10 ms). */
+    p->fifo_count.fifo_threshold = FIFO_TARGET;
 }

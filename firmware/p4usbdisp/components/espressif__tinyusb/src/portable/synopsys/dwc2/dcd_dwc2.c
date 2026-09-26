@@ -57,7 +57,12 @@ typedef struct {
   uint16_t max_size;
   uint8_t interval;
   uint8_t iso_retry; // ISO retry counter
+  // P4USBDISP PATCH: (micro)frame parity the last isochronous OUT arm targeted
+  // (bit 0), and whether a packet has confirmed it (ISO_PARITY_KNOWN).
+  uint8_t iso_parity;
 } xfer_ctl_t;
+
+#define ISO_PARITY_KNOWN 0x02
 
 // This variable is modified from ISR context, so it must be protected by critical section
 static xfer_ctl_t xfer_status[DWC2_EP_MAX][2];
@@ -309,6 +314,7 @@ static void edpt_activate(uint8_t rhport, const tusb_desc_endpoint_t* p_endpoint
 
   xfer_ctl_t* xfer = XFER_CTL_BASE(epnum, dir);
   xfer->max_size = tu_edpt_packet_size(p_endpoint_desc);
+  xfer->iso_parity = 0; // P4USBDISP PATCH: phase is unknown until a packet arrives
 
   const dwc2_dsts_t dsts = {.value = dwc2->dsts};
   if (dsts.enum_speed == DCFG_SPEED_HIGH) {
@@ -429,10 +435,27 @@ static void edpt_schedule_packets(uint8_t rhport, const uint8_t epnum, const uin
   if (depctl.type == DEPCTL_EPTYPE_ISOCHRONOUS) {
     const dwc2_dsts_t dsts = {.value = dwc2->dsts};
     const uint32_t odd_now = dsts.frame_number & 1u;
-    if (odd_now != 0) {
-      depctl.set_data0_iso_even = 1;
-    } else {
+    uint32_t target_odd = odd_now ^ 1u; // stock behaviour: the next (micro)frame
+
+    // P4USBDISP PATCH: an isochronous OUT endpoint with an even interval only
+    // ever receives on one (micro)frame parity, so re-arm for the parity the
+    // last packet actually arrived on. "The next frame" is wrong for every even
+    // interval (the stock driver drops every packet after the first couple at
+    // bInterval >= 2 on high speed), and with an interval of 8 microframes this
+    // also leaves ~875 us for a late completion interrupt to re-arm instead of
+    // none. Interval 1 keeps the stock behaviour. A wrong first guess is
+    // corrected by handle_incomplete_iso_out().
+    if (dir == TUSB_DIR_OUT && (xfer->interval & 1u) == 0 && (xfer->iso_parity & ISO_PARITY_KNOWN)) {
+      target_odd = xfer->iso_parity & 1u;
+    }
+    if (dir == TUSB_DIR_OUT) {
+      xfer->iso_parity = (uint8_t) ((xfer->iso_parity & ISO_PARITY_KNOWN) | target_odd);
+    }
+
+    if (target_odd != 0) {
       depctl.set_data1_iso_odd = 1;
+    } else {
+      depctl.set_data0_iso_even = 1;
     }
   }
 
@@ -832,6 +855,7 @@ static void handle_bus_reset(uint8_t rhport) {
   }
   if(dma_device_enabled(dwc2)) {
     gintmsk |= GINTMSK_OEPINT;
+    gintmsk |= GINTMSK_PXFRM_IISOOXFRM; // P4USBDISP PATCH: see handle_incomplete_iso_out()
     dma_setup_prepare(rhport);
   } else {
     dwc2->epout[0].doeptsiz |= (3 << DOEPTSIZ_STUPCNT_Pos);
@@ -1112,6 +1136,10 @@ static void handle_epout_dma(uint8_t rhport, uint8_t epnum, dwc2_doepint_t doepi
         }
 
         dcd_dcache_invalidate(xfer->buffer, received);
+        // P4USBDISP PATCH: a packet arrived on the parity this arm targeted.
+        if (((dwc2_depctl_t){.value = epout->doepctl}).type == DEPCTL_EPTYPE_ISOCHRONOUS) {
+          xfer->iso_parity |= ISO_PARITY_KNOWN;
+        }
         dcd_event_xfer_complete(rhport, epnum, xfer->total_len, XFER_RESULT_SUCCESS, true);
       }
     }
@@ -1171,6 +1199,36 @@ static void handle_ep_irq(uint8_t rhport, uint8_t dir) {
         }
         #endif
       }
+    }
+  }
+}
+
+// P4USBDISP PATCH: an armed isochronous OUT endpoint saw no packet in the
+// (micro)frame it targeted. For even-interval endpoints that means the parity
+// guess is wrong (first arm, or the host re-phased): flip it and forget it, so
+// the endpoint cannot stay deaf. Interval-1 endpoints are left to the stock
+// behaviour - flipping there would cost an extra packet.
+static void handle_incomplete_iso_out(uint8_t rhport) {
+  dwc2_regs_t      *dwc2    = DWC2_REG(rhport);
+  const dwc2_dsts_t dsts    = {.value = dwc2->dsts};
+  const uint32_t    odd_now = dsts.frame_number & 1u;
+
+  const uint8_t ep_count = dwc2_ep_count(dwc2);
+  for (uint8_t epnum = 1; epnum < ep_count; epnum++) {
+    dwc2_dep_t   *epout  = &dwc2->epout[epnum];
+    dwc2_depctl_t depctl = {.value = epout->doepctl};
+    xfer_ctl_t   *xfer   = XFER_CTL_BASE(epnum, TUSB_DIR_OUT);
+    if (depctl.enable && depctl.type == DEPCTL_EPTYPE_ISOCHRONOUS && (xfer->interval & 1u) == 0 &&
+        depctl.dpid_iso_odd == odd_now) {
+      const uint32_t flipped = (xfer->iso_parity & 1u) ^ 1u;
+      xfer->iso_parity = (uint8_t) flipped; // unconfirmed until a packet lands
+      depctl.value = epout->doepctl;
+      if (flipped) {
+        depctl.set_data1_iso_odd = 1;
+      } else {
+        depctl.set_data0_iso_even = 1;
+      }
+      epout->doepctl = depctl.value;
     }
   }
 }
@@ -1315,6 +1373,12 @@ void dcd_int_handler(uint8_t rhport) {
     handle_ep_irq(rhport, TUSB_DIR_OUT);
   }
 #endif
+
+  // P4USBDISP PATCH: incomplete isochronous OUT transfer.
+  if (gintsts & GINTSTS_PXFR_INCOMPISOOUT) {
+    dwc2->gintsts = GINTSTS_PXFR_INCOMPISOOUT;
+    handle_incomplete_iso_out(rhport);
+  }
 
   // Incomplete isochronous IN transfer interrupt handling (masked when PTI is enabled).
   if (gintsts & GINTSTS_IISOIXFR) {

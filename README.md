@@ -36,6 +36,7 @@ ESP32-P4 silicon is **v1.3** (pre-v3): builds need `CONFIG_ESP32P4_SELECTS_REV_L
 |---|---|
 | `firmware/p4usbdisp/` | the display firmware (display link, HID touchscreen, UAC2 speaker) |
 | `firmware/p4usbdisp/components/gsl3680/` | touch controller driver, from p4dash, plus a multi-point read |
+| `firmware/p4usbdisp/components/espressif__tinyusb/` | TinyUSB 0.21.0~2, vendored with a DWC2 isochronous fix - see its `PATCHES.md` |
 | `firmware/usb_hs_test/` | bare HS bulk throughput test (kept as a reference measurement) |
 | `host/evdi_display.py` | the daemon: EVDI monitor → JPEG → USB |
 | `host/edid.py` | EDID for the virtual connector (800×1280, 135×217 mm) |
@@ -58,6 +59,7 @@ ESP32-P4 silicon is **v1.3** (pre-v3): builds need `CONFIG_ESP32P4_SELECTS_REV_L
 | Desktop via EVDI, continuous motion | ~57.5 fps - every frame KWin renders for the output |
 | Host time per frame, update ready → USB send done | 7–9 ms avg, ~12 ms worst |
 | Compositor frame → glass (estimated) | ~20–35 ms (host 8 + receive ~2 + decode 10.5 + scan-out 0–16) |
+| Audio under full display load | 1000/1000 packets/s, 0 underruns, FIFO 1.6–2.5 KB around a 2 KB target |
 
 ## Setup
 
@@ -116,7 +118,7 @@ Composite device (`bDeviceClass` Misc/IAD), class defined per interface:
 |---|---|
 | interface 0 | vendor class, bulk OUT `0x01` - the display link below |
 | interface 1 | HID multi-touch touchscreen, interrupt IN `0x82`, 1 ms - 5 contacts in panel pixels (800×1280) with physical size 135×217 mm, so the compositor maps and rotates it with the monitor |
-| interfaces 2–3 | USB Audio Class 2 speaker (IAD-grouped): 48 kHz stereo 16-bit, isochronous OUT `0x03`, asynchronous with feedback IN `0x83`; volume −50..0 dB and mute via the feature unit |
+| interfaces 2–3 | USB Audio Class 2 speaker (IAD-grouped): 48 kHz stereo 16-bit, isochronous OUT `0x03` every 1 ms, asynchronous with feedback IN `0x83`; volume −50..0 dB and mute via the feature unit |
 
 The touch controller's point order and 4-bit finger tag are not stable identities, so
 the board runs a nearest-neighbour tracker to give each finger a persistent HID contact ID.
@@ -187,6 +189,40 @@ vendor-specific, the host has no reason to look for a HID interface inside it.
 **A USB touchscreen is not mapped to its monitor automatically.** KWin leaves an
 external touchscreen with no output, so touches land on the wrong screen until
 `outputName` is set (see Setup). The setting then persists.
+
+**Isochronous audio packets were lost during every JPEG decode - the static.**
+One 125 µs packet went missing per decoded frame (~50/s), while the byte count
+still looked right because the feedback loop made the host send slightly more.
+Not a USB bandwidth, FIFO, cache-maintenance or flash-execution problem (each
+measured and ruled out: bulk traffic alone and copying into PSRAM lose nothing,
+a 2 MB cache invalidate takes ~10 µs, moving the ISR to IRAM or the other core
+barely helps). During a decode the completion interrupt simply arrives late,
+and TinyUSB's DWC2 driver re-arms isochronous endpoints for "the next
+microframe" - which, when late, is the one after the packet it should have
+caught. The fix is a 1 ms audio interval (`bInterval` 4) - ~875 µs of slack -
+which stock TinyUSB cannot do: it mis-targets the parity at every even interval
+and stops receiving after a packet or two. Hence the vendored, patched TinyUSB.
+Diagnosis tools that stay in the tree: per-packet counters in the stats reply
+(the daemon prints `rx N pkt/s`), and display frame type 2, which exercises the
+receive path without decoding.
+
+**Payload reception pauses while a frame decodes.** Part of the same hunt: the
+controller shares one receive FIFO between all OUT endpoints, and bulk data
+arriving during a decode fills it. No payload transfer is armed until the
+decode ends, so bulk is NAKed and the FIFO stays free. Receive and decode were
+already serialising on memory bandwidth, so this costs no frame rate.
+
+**Fill the I2S DMA ring before draining the audio FIFO.** Writes into an empty
+ring return instantly, so the first 20 ms of a stream drained the USB FIFO
+faster than real time, underran, re-prefilled and repeated - five or six gaps
+at the start of every stream. Writing a ring's worth of silence first makes
+every later write block for exactly its own duration.
+
+**TinyUSB's FIFO-count feedback overshoots at stream start.** It is a
+proportional controller on a ~64 ms average, and the prefill period reads as
+"too low", so the level overshoots by about another 2 KB before settling. With
+the target at half of a 4 KB FIFO that filled it and dropped samples. The FIFO
+is now 8 KB with the target pinned at 2 KB (unchanged latency, ~10.7 ms).
 
 **Opening the JTAG serial port resets the board.** Any serial monitor started
 during a test reboots the P4 under it - the "log" is then a boot log and the test

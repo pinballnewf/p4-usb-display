@@ -39,9 +39,12 @@ static decode_stats_t s_dec;
 
 static void stats_ext(uint8_t *buf, uint16_t *len, uint16_t max)
 {
-    if (max >= sizeof(s_dec)) {
+    audio_stats_t a;
+    if (max >= sizeof(s_dec) + sizeof(a)) {
+        audio_get_stats(&a);
         memcpy(buf, &s_dec, sizeof(s_dec));
-        *len = sizeof(s_dec);
+        memcpy(buf + sizeof(s_dec), &a, sizeof(a));
+        *len = sizeof(s_dec) + sizeof(a);
     }
 }
 

@@ -1,0 +1,13 @@
+# Keep TinyUSB's interrupt path out of flash. During a JPEG decode the engine
+# (~200 MB/s into PSRAM) and the panel's DPI scan (~120 MB/s out of it) saturate
+# the shared cache/memory path, and an ISR executing from flash stalls on every
+# cache miss. Isochronous audio packets arrive every 125 us and must be re-armed
+# inside that window, so a stalled ISR loses one - audible as static.
+[mapping:tinyusb_iram]
+archive: libespressif__tinyusb.a
+entries:
+    dcd_dwc2 (noflash)
+    dwc2_common (noflash)
+    usbd (noflash)
+    audio_device (noflash)
+    tusb_fifo (noflash)
