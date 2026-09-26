@@ -8,5 +8,12 @@ dependencies:
   # Device stack for the P4's USB 2.0 HS OTG port (middle USB-C). 1.x API.
   espressif/esp_tinyusb: "~1.7.0"
 
+  # TinyUSB itself (normally pulled in by esp_tinyusb), overridden with a
+  # patched copy: interval-aware isochronous OUT parity in the DWC2 driver.
+  # See components/espressif__tinyusb/PATCHES.md.
+  espressif/tinyusb:
+    version: "0.21.0~2"
+    override_path: "../components/espressif__tinyusb"
+
   # ES8311 codec control + I2S data path. 1.x line, as proven in p4dash.
   espressif/esp_codec_dev: "~1.6.2"
