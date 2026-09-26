@@ -102,6 +102,30 @@ def open_evdi():
 BUF_ID = 1
 
 
+class Stats:
+    """Per-stage host timings over a reporting window: average / worst, in ms.
+    wait = update ready -> grab starts, total = update ready -> USB send done."""
+    STAGES = ("wait", "grab", "enc", "send", "total")
+
+    def __init__(self):
+        self.n = 0
+        self.bytes = 0
+        self.sum = dict.fromkeys(self.STAGES, 0.0)
+        self.max = dict.fromkeys(self.STAGES, 0.0)
+
+    def add(self, wait, grab, enc, send, total, nbytes):
+        self.n += 1
+        self.bytes += nbytes
+        for k, v in zip(self.STAGES, (wait, grab, enc, send, total)):
+            self.sum[k] += v
+            self.max[k] = max(self.max[k], v)
+
+    def line(self, secs):
+        parts = " ".join(f"{k} {self.sum[k] / self.n * 1000:4.1f}/{self.max[k] * 1000:4.0f}"
+                         for k in self.STAGES)
+        return f"{self.n / secs:5.1f} fps {self.bytes / self.n / 1024:4.0f} KB | ms avg/max: {parts}"
+
+
 class EvdiDisplay:
     def __init__(self, args):
         self.args = args
@@ -111,6 +135,7 @@ class EvdiDisplay:
         self.mode = None
         self.rects = (Rect * MAX_DIRTS)()
         self.update_ready = False
+        self.t_ready = None  # when the pending update became available
         self.backlight = 80
         self.dpms_on = True
 
@@ -144,6 +169,8 @@ class EvdiDisplay:
 
     def _on_update(self, buffer_id, _ud):
         self.update_ready = True
+        if self.t_ready is None:
+            self.t_ready = time.perf_counter()
 
     def connect(self):
         w, h = (1280, 800) if self.args.landscape else (PANEL_W, PANEL_H)
@@ -169,44 +196,56 @@ class EvdiDisplay:
         poller.register(fd, select.POLLIN)
         min_period = 1.0 / self.args.max_fps
         last_send = 0.0
-        n = total = 0
-        t_enc = 0.0
         t_report = time.perf_counter()
+        st = Stats()
 
         while True:
-            if poller.poll(100):
+            # With an update already pending, only wait out the frame-rate cap;
+            # otherwise sleep until EVDI signals. Waiting the full timeout with
+            # an update pending stalled frames by up to 100 ms.
+            if self.update_ready and self.buf is not None:
+                timeout_ms = max(0.0, (last_send + min_period - time.perf_counter()) * 1000)
+            else:
+                timeout_ms = 100
+            if poller.poll(timeout_ms):
                 lib.evdi_handle_events(self.h, C.byref(self.ctx))
+                if self.update_ready and self.t_ready is None:
+                    self.t_ready = time.perf_counter()
 
             now = time.perf_counter()
             if self.update_ready and self.buf is not None and now - last_send >= min_period:
+                t0 = now
+                t_ready = self.t_ready or t0
                 self.update_ready = False
+                self.t_ready = None
                 nrects = C.c_int(MAX_DIRTS)
                 lib.evdi_grab_pixels(self.h, self.rects, C.byref(nrects))
+                t1 = time.perf_counter()
                 if nrects.value and self.dpms_on:
-                    a = time.perf_counter()
                     jpeg = self.encode()
-                    t_enc += time.perf_counter() - a
+                    t2 = time.perf_counter()
                     if jpeg:
                         self.disp.send_jpeg(jpeg)
-                        n += 1
-                        total += len(jpeg)
-                last_send = now
+                        t3 = time.perf_counter()
+                        st.add(t0 - t_ready, t1 - t0, t2 - t1, t3 - t2, t3 - t_ready, len(jpeg))
+                last_send = t0
                 # Ask for the next frame; True means one is already waiting.
                 self.update_ready = lib.evdi_request_update(self.h, BUF_ID)
+                if self.update_ready:
+                    self.t_ready = time.perf_counter()
             elif self.buf is not None and not self.update_ready and now - last_send >= 1.0:
                 # Re-arm periodically in case an update request was consumed silently.
                 self.update_ready = lib.evdi_request_update(self.h, BUF_ID)
+                if self.update_ready:
+                    self.t_ready = time.perf_counter()
 
-            if now - t_report >= 5 and n:
-                s = self.disp.stats()
-                el = now - t_report
-                print(f"{n / el:5.1f} fps  {total / n / 1024:5.0f} KB/frame  enc {t_enc / n * 1000:4.1f} ms"
-                      f" | board decode {s.get('decode_us_last', 0) / 1000:.1f} ms fail {s.get('decode_fail')}",
-                      flush=True)
-                n = total = 0
-                t_enc = 0.0
-                t_report = now
-            elif now - t_report >= 5:
+            if now - t_report >= 5:
+                if st.n:
+                    s = self.disp.stats()
+                    print(st.line(now - t_report) +
+                          f" | board decode {s.get('decode_us_last', 0) / 1000:.1f} ms"
+                          f" stale {s['frames_stale']} fail {s.get('decode_fail')}", flush=True)
+                st = Stats()
                 t_report = now
 
     def close(self):
