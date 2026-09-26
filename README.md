@@ -55,6 +55,9 @@ ESP32-P4 silicon is **v1.3** (pre-v3): builds need `CONFIG_ESP32P4_SELECTS_REV_L
 | Ceiling, small frames | ~82 fps (decode and next receive serialise on memory bandwidth) |
 | Worst case (755 KB noise frames) | 29 MB/s, every frame shown |
 | Host encode (simplejpeg, BGRX, no rotation) | ~2–5 ms |
+| Desktop via EVDI, continuous motion | ~57.5 fps - every frame KWin renders for the output |
+| Host time per frame, update ready → USB send done | 7–9 ms avg, ~12 ms worst |
+| Compositor frame → glass (estimated) | ~20–35 ms (host 8 + receive ~2 + decode 10.5 + scan-out 0–16) |
 
 ## Setup
 
