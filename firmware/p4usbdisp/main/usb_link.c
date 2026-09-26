@@ -36,6 +36,7 @@
 #include "tinyusb.h"
 #include "device/usbd_pvt.h"
 
+#include "audio.h"
 #include "touch.h"
 
 static const char *TAG = "usb_link";
@@ -47,24 +48,28 @@ static const char *TAG = "usb_link";
 
 /* Composite: interface 0 is the display link (vendor class, our own driver),
  * interface 1 a standard HID multi-touch touchscreen (TinyUSB's HID class,
- * bound by the host's hid-multitouch with no host-side code). */
-enum { ITF_DISPLAY = 0, ITF_TOUCH, ITF_COUNT };
+ * bound by the host's hid-multitouch with no host-side code), interfaces 2-3 a
+ * UAC2 speaker (TinyUSB's audio class, see audio.c). */
+enum { ITF_DISPLAY = 0, ITF_TOUCH, ITF_AUDIO_CTRL, ITF_AUDIO_STREAM, ITF_COUNT };
+_Static_assert(ITF_AUDIO_CTRL == AUDIO_ITF_CONTROL && ITF_AUDIO_STREAM == AUDIO_ITF_STREAMING,
+               "audio.h interface numbers out of step");
 #define EP_OUT   0x01
 #define EP_IN    0x81
 #define EP_TOUCH 0x82
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_VENDOR_DESC_LEN + TUD_HID_DESC_LEN)
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_VENDOR_DESC_LEN + TUD_HID_DESC_LEN + AUDIO_SPEAKER_DESC_LEN)
 
 static const tusb_desc_device_t s_device_desc = {
     .bLength = sizeof(tusb_desc_device_t),
     .bDescriptorType = TUSB_DESC_DEVICE,
     .bcdUSB = 0x0200,
-    .bDeviceClass = TUSB_CLASS_UNSPECIFIED, /* per interface: vendor + HID */
-    .bDeviceSubClass = 0x00,
-    .bDeviceProtocol = 0x00,
+    /* Per-interface classes, and the audio function is grouped by an IAD. */
+    .bDeviceClass = TUSB_CLASS_MISC,
+    .bDeviceSubClass = MISC_SUBCLASS_COMMON,
+    .bDeviceProtocol = MISC_PROTOCOL_IAD,
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor = USB_VID,
     .idProduct = USB_PID,
-    .bcdDevice = 0x0300,
+    .bcdDevice = 0x0400,
     .iManufacturer = 1,
     .iProduct = 2,
     .iSerialNumber = 3,
@@ -75,9 +80,10 @@ static const tusb_desc_device_qualifier_t s_qualifier_desc = {
     .bLength = sizeof(tusb_desc_device_qualifier_t),
     .bDescriptorType = TUSB_DESC_DEVICE_QUALIFIER,
     .bcdUSB = 0x0200,
-    .bDeviceClass = TUSB_CLASS_UNSPECIFIED, /* per interface: vendor + HID */
-    .bDeviceSubClass = 0x00,
-    .bDeviceProtocol = 0x00,
+    /* Per-interface classes, and the audio function is grouped by an IAD. */
+    .bDeviceClass = TUSB_CLASS_MISC,
+    .bDeviceSubClass = MISC_SUBCLASS_COMMON,
+    .bDeviceProtocol = MISC_PROTOCOL_IAD,
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
     .bNumConfigurations = 1,
     .bReserved = 0,
@@ -87,6 +93,7 @@ static const uint8_t s_fs_config_desc[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_COUNT, 0, CONFIG_TOTAL_LEN, 0, 500),
     TUD_VENDOR_DESCRIPTOR(ITF_DISPLAY, 4, EP_OUT, EP_IN, 64),
     TUD_HID_DESCRIPTOR(ITF_TOUCH, 5, HID_ITF_PROTOCOL_NONE, TOUCH_HID_REPORT_DESC_LEN, EP_TOUCH, 64, 1),
+    AUDIO_SPEAKER_DESCRIPTOR(TUD_AUDIO_EP_SIZE(false, AUDIO_SAMPLE_RATE, AUDIO_BYTES_PER_SMP, AUDIO_CHANNELS), 1),
 };
 
 static const uint8_t s_hs_config_desc[] = {
@@ -94,6 +101,8 @@ static const uint8_t s_hs_config_desc[] = {
     TUD_VENDOR_DESCRIPTOR(ITF_DISPLAY, 4, EP_OUT, EP_IN, 512),
     /* bInterval 4 at high speed = 2^(4-1) microframes = 1 ms */
     TUD_HID_DESCRIPTOR(ITF_TOUCH, 5, HID_ITF_PROTOCOL_NONE, TOUCH_HID_REPORT_DESC_LEN, EP_TOUCH, 64, 4),
+    /* feedback interval 4 at high speed = every 8 microframes = 1 ms */
+    AUDIO_SPEAKER_DESCRIPTOR(TUD_AUDIO_EP_SIZE(true, AUDIO_SAMPLE_RATE, AUDIO_BYTES_PER_SMP, AUDIO_CHANNELS), 4),
 };
 
 static const char *s_string_desc[] = {
@@ -103,6 +112,7 @@ static const char *s_string_desc[] = {
     "000001",
     "Display",
     "Touch",
+    "P4 USB Display Speaker",
 };
 
 /* ---- Frame slots ---- */

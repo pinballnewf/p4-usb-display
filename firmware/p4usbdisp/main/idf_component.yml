@@ -7,3 +7,6 @@ dependencies:
 
   # Device stack for the P4's USB 2.0 HS OTG port (middle USB-C). 1.x API.
   espressif/esp_tinyusb: "~1.7.0"
+
+  # ES8311 codec control + I2S data path. 1.x line, as proven in p4dash.
+  espressif/esp_codec_dev: "~1.6.2"

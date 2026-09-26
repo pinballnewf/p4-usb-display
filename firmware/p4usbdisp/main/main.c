@@ -22,6 +22,7 @@
 
 #include "bsp_display.h"
 #include "bsp_pins.h"
+#include "audio.h"
 #include "touch.h"
 #include "usb_link.h"
 
@@ -96,6 +97,9 @@ void app_main(void)
     /* A missing or failed touch controller must not take the display down. */
     if (touch_init(i2c_bus) != ESP_OK) {
         ESP_LOGE(TAG, "touch unavailable - display only");
+    }
+    if (audio_init(i2c_bus) != ESP_OK) {
+        ESP_LOGE(TAG, "audio unavailable");
     }
 
     jpeg_decoder_handle_t dec = NULL;

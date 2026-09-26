@@ -5,7 +5,9 @@ real extra monitor for a Linux laptop over one USB 2.0 cable. The desktop sees
 it as a normal display (KDE: output `DVI-I-1`, "P4 USB Panel"), with orientation,
 placement and power handled by the compositor like any other monitor. The
 panel's touchscreen shows up as a standard multi-touch HID device, so tapping,
-dragging, two-finger scroll and pinch work on the desktop with no host code.
+dragging, two-finger scroll and pinch work on the desktop with no host code,
+and its speaker is a standard USB audio output ("P4 USB Display" in the sound
+settings) with hardware volume.
 
 ```
 KWin ──> EVDI virtual connector ──> evdi_display.py ──USB 2.0 HS──> P4 ──> JD9365 panel
@@ -32,7 +34,7 @@ ESP32-P4 silicon is **v1.3** (pre-v3): builds need `CONFIG_ESP32P4_SELECTS_REV_L
 
 | | |
 |---|---|
-| `firmware/p4usbdisp/` | the display firmware (display link + HID touchscreen) |
+| `firmware/p4usbdisp/` | the display firmware (display link, HID touchscreen, UAC2 speaker) |
 | `firmware/p4usbdisp/components/gsl3680/` | touch controller driver, from p4dash, plus a multi-point read |
 | `firmware/usb_hs_test/` | bare HS bulk throughput test (kept as a reference measurement) |
 | `host/evdi_display.py` | the daemon: EVDI monitor → JPEG → USB |
@@ -105,12 +107,13 @@ journalctl --user -u p4-usb-display -f
 
 ## USB interfaces and wire protocol
 
-Composite device, class defined per interface:
+Composite device (`bDeviceClass` Misc/IAD), class defined per interface:
 
 | | |
 |---|---|
 | interface 0 | vendor class, bulk OUT `0x01` - the display link below |
 | interface 1 | HID multi-touch touchscreen, interrupt IN `0x82`, 1 ms - 5 contacts in panel pixels (800×1280) with physical size 135×217 mm, so the compositor maps and rotates it with the monitor |
+| interfaces 2–3 | USB Audio Class 2 speaker (IAD-grouped): 48 kHz stereo 16-bit, isochronous OUT `0x03`, asynchronous with feedback IN `0x83`; volume −50..0 dB and mute via the feature unit |
 
 The touch controller's point order and 4-bit finger tag are not stable identities, so
 the board runs a nearest-neighbour tracker to give each finger a persistent HID contact ID.
@@ -182,6 +185,24 @@ vendor-specific, the host has no reason to look for a HID interface inside it.
 external touchscreen with no output, so touches land on the wrong screen until
 `outputName` is set (see Setup). The setting then persists.
 
+**Opening the JTAG serial port resets the board.** Any serial monitor started
+during a test reboots the P4 under it - the "log" is then a boot log and the test
+ran against a device that disappeared. Read the board's state over USB (the
+stats control request) instead, or only open the port when a reset is wanted.
+
+**The ES8311 is mono.** One DAC fed from the left I2S slot, one speaker. A stereo
+stream sent straight through loses everything panned right; the firmware mixes
+L+R down before the codec.
+
+**TinyUSB's audio class has no esp_tinyusb Kconfig.** Its `CFG_TUD_AUDIO_*`
+settings are only defaulted when undefined, so they are set build-wide in the
+project `CMakeLists.txt` (`idf_build_set_property(COMPILE_DEFINITIONS ...)`) -
+TinyUSB, esp_tinyusb and main must all see the same values.
+
+**The amp hisses when left enabled.** PA_CTRL is driven by the audio task, not
+esp_codec_dev: on only while the host streams, after 10 ms of silence has been
+clocked through so it does not switch on into a step.
+
 **uaccess rules must sort before `73-seat-late.rules`.** A `99-*.rules` file with
 `TAG+="uaccess"` silently does nothing; the device stays root-only and pyusb
 reports "The device has no langid". Hence the `70-` prefixes.
@@ -198,5 +219,5 @@ first time when restarting the service.
 
 ## Not done
 
-- **Sound.** ES8311 codec + NS4150 amp, as USB Audio Class (in progress).
+- **Microphone.** The single analog mic on the ES8311 could be a UAC2 input.
 - **Real USB PID.** `303a:4020` is an unallocated development PID.
