@@ -1,4 +1,5 @@
 build/
+build-rev*/
 managed_components/
 dependencies.lock
 sdkconfig
@@ -8,3 +9,4 @@ __pycache__/
 
 # Full flash dumps: large, and may carry credentials from whatever was flashed before.
 backup/
+dist/

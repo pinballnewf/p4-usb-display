@@ -6,7 +6,7 @@
  * by locating the esp_lcd_jd9365 init table (array of
  * {int cmd; const void *data; size_t data_bytes; unsigned delay_ms}) and
  * resolving each data pointer through the app image's segment map.
- * 204 commands. Extraction script: scratchpad/extract_init.py
+ * 204 commands. Extraction script: tools/extract_init.py
  *
  * WHY THIS EXISTS
  * Guition revised the glass at some point and ships two firmware images. Every
@@ -22,8 +22,10 @@
  *   reg 0x01         0x39 -> 0x44   power / VCOM
  *   reg 0x37..0x3A   69 05 06 08 -> 09 04 00 01
  *
- * If your board shows the old behaviour with this table, you likely have the
- * ORIGINAL panel - use jd9365_guition_init.h instead.
+ * If your board stays dark or washed out with this table, you likely have the
+ * ORIGINAL panel: try the driver's built-in table (set .init_cmds = NULL and
+ * .init_cmds_size = 0 in bsp_display.c), or extract the table from your
+ * board's own factory image with tools/extract_init.py.
  */
 
 #pragma once

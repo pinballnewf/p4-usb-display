@@ -292,17 +292,66 @@ def kscreen_outputs():
     return outputs
 
 
-def rotate_output_later(before, delay=3.0):
-    """Ask KDE to rotate the new output to landscape (panel is natively portrait).
-    kscreen-doctor does not show monitor names, so the P4 is whichever output
-    appeared after we connected. KDE remembers the setting per monitor, so this
-    only matters the first time."""
-    time.sleep(delay)
-    new = {k: v for k, v in kscreen_outputs().items() if k not in before}
-    for name, rotation in new.items():
-        if rotation == 1:  # 1 = none; left = 90 degrees counter-clockwise
-            subprocess.run(["kscreen-doctor", f"output.{name}.rotation.left"], timeout=5)
-            print(f"asked KDE to rotate {name} to landscape", flush=True)
+def wait_new_output(before, timeout=15.0):
+    """The P4's connector name (e.g. DVI-I-1) differs between machines and
+    kscreen-doctor does not show monitor names, so it is whichever output
+    appeared after we connected. None if kscreen-doctor is unavailable."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        new = {k: v for k, v in kscreen_outputs().items() if k not in before}
+        if new:
+            return next(iter(new.items()))
+        time.sleep(0.5)
+    return None
+
+
+def kwin_map_touch(output_name):
+    """Tie the board's touchscreen to its monitor in KWin. An external USB
+    touchscreen is otherwise left unmapped and its touches land on the wrong
+    screen. KWin saves the mapping, so this is a no-op after the first run."""
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio, GLib
+    except (ImportError, ValueError):
+        return
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+
+        def call(path, iface, method, args=None, ret=None):
+            return bus.call_sync("org.kde.KWin", path, iface, method, args,
+                                 GLib.VariantType(ret) if ret else None,
+                                 Gio.DBusCallFlags.NONE, 2000, None)
+
+        def prop(path, name):
+            return call(path, "org.freedesktop.DBus.Properties", "Get",
+                        GLib.Variant("(ss)", ("org.kde.KWin.InputDevice", name)), "(v)").unpack()[0]
+
+        devices = call("/org/kde/KWin/InputDevice", "org.kde.KWin.InputDeviceManager",
+                       "ListTouch", None, "(as)").unpack()[0]
+        for dev in devices:
+            path = f"/org/kde/KWin/InputDevice/{dev}"
+            if "P4 USB Display" not in prop(path, "name"):
+                continue
+            if prop(path, "outputName") != output_name:
+                call(path, "org.freedesktop.DBus.Properties", "Set",
+                     GLib.Variant("(ssv)", ("org.kde.KWin.InputDevice", "outputName",
+                                            GLib.Variant("s", output_name))))
+                print(f"mapped touchscreen {dev} to {output_name}", flush=True)
+    except GLib.Error:
+        pass  # not KWin, or no session bus: nothing to map
+
+
+def desktop_setup(before, rotate):
+    """First-run conveniences once the compositor has picked up the monitor."""
+    found = wait_new_output(before)
+    if not found:
+        return
+    name, rotation = found
+    if rotate and rotation == 1:  # 1 = none; left = 90 degrees counter-clockwise
+        subprocess.run(["kscreen-doctor", f"output.{name}.rotation.left"], timeout=5)
+        print(f"asked KDE to rotate {name} to landscape", flush=True)
+    kwin_map_touch(name)
 
 
 def main():
@@ -319,9 +368,9 @@ def main():
     before = kscreen_outputs()
     d = EvdiDisplay(args)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    if args.rotate_output and not args.landscape:
-        import threading
-        threading.Thread(target=rotate_output_later, args=(before,), daemon=True).start()
+    import threading
+    threading.Thread(target=desktop_setup, args=(before, args.rotate_output and not args.landscape),
+                     daemon=True).start()
     try:
         d.run()
     except KeyboardInterrupt:

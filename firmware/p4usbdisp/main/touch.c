@@ -28,7 +28,7 @@
 
 static const char *TAG = "touch";
 
-#define POLL_MS     8   /* 125 Hz, as p4tab used */
+#define POLL_MS     8   /* 125 Hz */
 #define MAX_JUMP_PX 250 /* a finger cannot move further than this in one poll */
 
 /* Physical size in 0.1 mm (unit cm, exponent -2): 135.36 x 216.58 mm. */
@@ -236,7 +236,7 @@ static void touch_task(void *arg)
 
 esp_err_t touch_init(i2c_master_bus_handle_t bus)
 {
-    /* Calibration from p4dash bsp_touch.c: the controller's axes are transposed
+    /* Calibration measured on this board: the controller's axes are transposed
      * relative to the panel and in its own ~0..1650 x 0..900 space. Measured at
      * edge midpoints (corners read short on this digitiser). Describes the glass
      * relative to the native portrait raster, so it holds for any desktop

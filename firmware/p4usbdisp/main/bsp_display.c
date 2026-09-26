@@ -1,8 +1,8 @@
 /*
  * Display: internal LDO -> MIPI-DSI -> JD9365, no LVGL.
  *
- * Board bring-up is lifted from p4dash (bsp_display.c), which is proven on this
- * exact board. Read the traps section of p4dash/21.md before changing any of it;
+ * Board bring-up is lifted from the author's earlier firmware, proven on this
+ * exact board. Read the board traps in docs/DEVELOPMENT.md before changing it;
  * the short version:
  *   - the panel is Guition's REVISED glass and needs the 204-command table in
  *     jd9365_guition_newpanel_init.h - every open-source JD9365 table leaves it
@@ -10,7 +10,7 @@
  *   - stock 2-lane bus config and stock DPI timings, deliberately unmodified
  *   - mirror both axes (glass is mounted inverted relative to native scan)
  *
- * Frames are decoded straight into the single DPI frame buffer (p4tab's
+ * Frames are decoded straight into the single DPI frame buffer (the proven
  * approach): draw_bitmap on a DPI panel is asynchronous and its completion
  * handshake proved unreliable, whereas the panel rescans the buffer anyway.
  */

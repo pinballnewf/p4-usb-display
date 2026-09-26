@@ -76,7 +76,7 @@ class P4Display:
 
 def encode(img, rotate=90, quality=85):
     """Rotate into the panel raster and encode as baseline 4:2:0 JPEG - the
-    board's decoder hangs on 4:2:2 (p4tab trap)."""
+    board's decoder hangs on 4:2:2 (see docs/DEVELOPMENT.md)."""
     if rotate:
         img = img.rotate(rotate, expand=True)
     if img.size != (PANEL_W, PANEL_H):

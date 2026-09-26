@@ -3,9 +3,9 @@
  *
  * Host sends full-frame 4:2:0 JPEGs over the HS USB port (see usb_link.h);
  * the board decodes each into the panel's frame buffer with the hardware JPEG
- * engine. Full frames rather than tiles: p4tab measured the decoder at ~2.9 ms
- * fixed cost per call, so one 800x1280 decode (~10.5 ms) beats tiling for any
- * update touching more than ~12% of the screen.
+ * engine. Full frames rather than tiles: the decoder has ~2.9 ms of fixed cost
+ * per call (measured in an earlier project), so one 800x1280 decode (~10.5 ms)
+ * beats tiling for any update touching more than ~12% of the screen.
  */
 
 #include <inttypes.h>
@@ -114,7 +114,7 @@ void app_main(void)
     jpeg_decode_cfg_t dec_cfg = {
         .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
         /* BGR, not RGB: with RGB red and blue come out swapped on this panel
-         * (measured in p4tab). */
+         * (measured on this board). */
         .rgb_order     = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
         .conv_std      = JPEG_YUV_RGB_CONV_STD_BT601,
     };

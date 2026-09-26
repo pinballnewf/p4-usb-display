@@ -1,0 +1,5 @@
+# Overlay for production (v3.x) ESP32-P4 silicon. Applied after
+# sdkconfig.defaults by build_release.sh. Pre-v3 and v3+ chips are not binary
+# compatible; the board this was developed on has v1.3 silicon, so this
+# variant builds but is untested on hardware.
+# CONFIG_ESP32P4_SELECTS_REV_LESS_V3 is not set

@@ -4,7 +4,7 @@
  * The ES8311 is a mono codec (one DAC, one speaker via the NS4150): the host
  * sees a stereo speaker, and the two channels are mixed down here.
  *
- * Codec bring-up follows p4dash's bsp_audio.c (proven on this board), with two
+ * Codec bring-up follows the author's earlier, proven firmware for this board, with two
  * changes: playback only for now (the board's single analog mic can follow as a
  * UAC2 input), and the amp's enable line (PA_CTRL) is driven here rather than by
  * esp_codec_dev, so the amp only runs while the host is actually streaming -

@@ -1,0 +1,6 @@
+# Host daemon (evdi_display.py) and tools. PyGObject (python3-gi) comes from
+# the distribution; the venv is created with --system-site-packages to see it.
+pyusb>=1.2
+numpy>=1.26
+simplejpeg>=1.7
+pillow>=10

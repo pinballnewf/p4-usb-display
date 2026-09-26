@@ -1,6 +1,6 @@
 [Unit]
-Description=P4 USB Display (EVDI virtual monitor -> Guition JC8012P4A1C over USB)
-Documentation=file:///home/cdunn/ESP32-P4-Display/host/evdi_display.py
+Description=P4 USB Display (EVDI virtual monitor for a Guition JC8012P4A1C over USB)
+Documentation=https://github.com/pinballnewf/p4-usb-display
 # Started by udev (70-p4-usb-display.rules) when the board appears; BindsTo stops
 # it when the board goes away, which also removes the monitor from the desktop.
 BindsTo=sys-subsystem-usb-p4display.device
@@ -8,8 +8,8 @@ After=sys-subsystem-usb-p4display.device graphical-session.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/cdunn/ESP32-P4-Display/host
-ExecStart=/home/cdunn/ESP32-P4-Display/host/.venv/bin/python -u evdi_display.py
+WorkingDirectory=%h/.local/share/p4-usb-display
+ExecStart=%h/.local/share/p4-usb-display/venv/bin/python -u evdi_display.py
 # Covers the board resetting mid-stream and the EVDI card ACL arriving after us.
 Restart=on-failure
 RestartSec=3

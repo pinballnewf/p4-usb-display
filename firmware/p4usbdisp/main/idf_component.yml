@@ -2,7 +2,7 @@ dependencies:
   idf: ">=5.5"
 
   # MIPI-DSI variant of the panel driver. 1.x targets the SPI/RGB parts and will
-  # not drive this panel. 2.0.2 is the version p4dash was proven on.
+  # not drive this panel. 2.0.2 is the version proven on this board.
   espressif/esp_lcd_jd9365: "~2.0.2"
 
   # Device stack for the P4's USB 2.0 HS OTG port (middle USB-C). 1.x API.
@@ -15,5 +15,5 @@ dependencies:
     version: "0.21.0~2"
     override_path: "../components/espressif__tinyusb"
 
-  # ES8311 codec control + I2S data path. 1.x line, as proven in p4dash.
+  # ES8311 codec control + I2S data path. 1.x line, as proven on this board.
   espressif/esp_codec_dev: "~1.6.2"

@@ -1,7 +1,7 @@
 CONFIG_IDF_TARGET="esp32p4"
 
 # --- Chip revision: this board has EARLY P4 silicon (v1.3). Pre-v3 and v3+
-# are not binary compatible; see p4dash sdkconfig.defaults for the full story.
+# are not binary compatible; see docs/DEVELOPMENT.md.
 CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
 CONFIG_ESP32P4_REV_MIN_100=y
 
