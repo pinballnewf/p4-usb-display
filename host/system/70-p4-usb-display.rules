@@ -1,0 +1,7 @@
+# ESP32-P4 USB display (dev PID 303a:4020).
+# Non-root access for the logged-in user (must sort before 73-seat-late.rules),
+# plus a stable systemd device unit (sys-subsystem-usb-p4display.device) that
+# starts the user's p4-usb-display.service when the board is plugged in.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="303a", ATTR{idProduct}=="4020", \
+  MODE="0660", GROUP="plugdev", TAG+="uaccess", \
+  TAG+="systemd", ENV{SYSTEMD_ALIAS}="/sys/subsystem/usb/p4display", ENV{SYSTEMD_USER_WANTS}="p4-usb-display.service"

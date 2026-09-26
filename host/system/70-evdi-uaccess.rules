@@ -1,0 +1,3 @@
+# Give the logged-in user access to EVDI's DRM card node so the P4 USB display
+# daemon runs unprivileged. Must sort before 73-seat-late.rules for uaccess.
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", KERNELS=="evdi.[0-9]*", TAG+="uaccess"

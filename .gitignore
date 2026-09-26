@@ -1,0 +1,10 @@
+build/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+__pycache__/
+.venv/
+
+# Full flash dumps: large, and may carry credentials from whatever was flashed before.
+backup/

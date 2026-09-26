@@ -1,0 +1,9 @@
+dependencies:
+  idf: ">=5.5"
+
+  # MIPI-DSI variant of the panel driver. 1.x targets the SPI/RGB parts and will
+  # not drive this panel. 2.0.2 is the version p4dash was proven on.
+  espressif/esp_lcd_jd9365: "~2.0.2"
+
+  # Device stack for the P4's USB 2.0 HS OTG port (middle USB-C). 1.x API.
+  espressif/esp_tinyusb: "~1.7.0"
