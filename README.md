@@ -33,9 +33,9 @@ panel, GSL3680 touch). Two things vary between batches of this board:
   out after flashing, see [Troubleshooting](#troubleshooting).
 
 **The computer:** Linux with USB 2.0 (any USB-A or USB-C port; a C-to-A adapter
-is fine). Tested on **Ubuntu 26.04, KDE Plasma 6 (Wayland)**. The display uses
-[EVDI](https://github.com/DisplayLink/evdi) (the open-source part of DisplayLink
-support), so it should work with other desktops that support DisplayLink
+is fine). Tested on **Ubuntu 26.04** and **CachyOS**, both with **KDE Plasma 6
+(Wayland)**. The display uses [EVDI](https://github.com/DisplayLink/evdi) (the
+open-source part of DisplayLink support), so it should work with other desktops that support DisplayLink
 monitors; the automatic touchscreen mapping is KDE-only for now.
 
 **A USB-C cable** — the board has three USB-C ports along one edge:
@@ -74,7 +74,14 @@ The board restarts into a colour-bar test card. You can now unplug the upper por
 
 This installs EVDI and a few Python packages, adds two udev rules, and sets up a
 small user service that starts whenever the board is plugged in. It asks for
-your password for the system parts.
+your password for the system parts. It supports Debian/Ubuntu (apt) and
+Arch-based distributions such as CachyOS (pacman; EVDI comes from the AUR's
+`evdi-dkms`, built with `paru`/`yay` if you have one, otherwise `makepkg`).
+
+> **Arch/CachyOS:** DKMS needs the headers package matching your *running*
+> kernel (e.g. `linux-cachyos-lts-headers` for `linux-cachyos-lts`). If you hold
+> the kernel back with `IgnorePkg`, hold its headers too, or the two drift apart
+> and the module isn't built for the kernel you boot. The installer checks this.
 
 > **Secure Boot:** EVDI is a kernel module, so on a Secure Boot machine it has to
 > be signed with a key your firmware trusts. If you don't already have one
@@ -144,7 +151,7 @@ current.
 ```
 
 The EVDI packages are left in place (other software may use them); the script
-prints the command to remove them.
+prints the command to remove them (`apt remove` or `pacman -Rns`).
 
 ## How it works
 
